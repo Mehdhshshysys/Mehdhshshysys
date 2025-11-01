@@ -1,0 +1,94 @@
+// Cloudflare Worker version of the bot.php
+// This script assumes you're using Cloudflare Workers to run a Telegram bot
+// Environment bindings: TELEGRAM_TOKEN, ADMIN_ID, CHANNEL_USERNAME, USERS_KV (KV Namespace)
+
+export default {
+  async fetch(request, env, ctx) {
+    const { TELEGRAM_TOKEN, ADMIN_ID, CHANNEL_USERNAME, USERS_KV } = env;
+    if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
+
+    const telegramIPRanges = [
+      ['149.154.160.0', '149.154.175.255'],
+      ['91.108.4.0', '91.108.7.255']
+    ];
+
+    const clientIP = request.headers.get('CF-Connecting-IP');
+    if (!clientIP || !ipInRanges(clientIP, telegramIPRanges)) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+
+    const update = await request.json();
+    if (!update) return new Response('No update', { status: 400 });
+
+    const message = update.message ?? null;
+    const callback_query = update.callback_query ?? null;
+
+    if (message) {
+      const chat_id = message.chat.id;
+      const from_id = message.from.id;
+      const text = message.text ?? '';
+
+      await saveUser(USERS_KV, from_id);
+
+      if (!(await isUserInChannel(TELEGRAM_TOKEN, CHANNEL_USERNAME, from_id))) {
+        await sendMessage(TELEGRAM_TOKEN, chat_id, 'لطفا ابتدا عضو کانال شوید');
+        return new Response('OK');
+      }
+
+      if (text === '/start') {
+        await sendMessage(TELEGRAM_TOKEN, chat_id, 'سلام! خوش آمدید 🌟');
+      }
+    }
+
+    return new Response('OK');
+  },
+};
+
+function ipInRanges(ip, ranges) {
+  const ipToLong = (ip) => ip.split('.').reduce((acc, octet) => (acc << 8) + +octet, 0);
+  const ipLong = ipToLong(ip);
+  return ranges.some(([lower, upper]) => {
+    return ipLong >= ipToLong(lower) && ipLong <= ipToLong(upper);
+  });
+}
+
+async function bot(token, method, data) {
+  const url = `https://api.telegram.org/bot${token}/${method}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  return await res.json();
+}
+
+async function sendMessage(token, chat_id, text, keyboard = null) {
+  const payload = {
+    chat_id,
+    text,
+    parse_mode: 'HTML',
+  };
+  if (keyboard) {
+    payload.reply_markup = {
+      keyboard,
+      resize_keyboard: true,
+      one_time_keyboard: true
+    };
+  }
+  await bot(token, 'sendMessage', payload);
+}
+
+async function isUserInChannel(token, channel, user_id) {
+  const res = await bot(token, 'getChatMember', {
+    chat_id: channel,
+    user_id
+  });
+  const status = res?.result?.status || 'left';
+  return ['member', 'administrator', 'creator'].includes(status);
+}
+
+async function saveUser(kv, user_id) {
+  const key = `user_${user_id}`;
+  const exists = await kv.get(key);
+  if (!exists) await kv.put(key, '1');
+}
